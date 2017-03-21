@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+	<title>CSA firebase</title>
+</head>
+<style type="text/css">
+	body {font-size: 1.2em;}
+	.mContent {margin: auto; width: 50em;}
+</style>
+<body>
+<script type='text/javascript' src='http://www.csagroup.org/wp-content/themes/csagroup/js/jquery-1.11.3.min.js?ver=1.11.3'></script>
+<script src="http://cpl.csagroup.org/scripts/firebase.js"></script>
+<script>
+function search(){
+    var id=$('#stext').val();
+    var ref = new Firebase("https://csagroupacc.firebaseio.com").child("classes").child(id);
+    ref.on("value", function(res){ 
+    	var cl=res.val();
+    	$("#number").text(cl.number); 
+    	$("#desc").text(cl.desc); 
+    	$("#description").empty().append(cl.classtext);
+    });
+}
+</script>
+<div class="mContent">
+<input id='stext'></input><button onclick="search();">Search</button>
+<article>
+<table class="table" border="0" cellspacing="0" cellpadding="0" class="table table-bordered">
+<tbody>
+<tr>
+<td width='150px'>Class NO.</td>
+<td><div id="number" style='font-size:1.5rem'></div></td>
+</tr>
+<tr>
+<td>
+Description
+</td>
+<th>
+<div id="desc"></div>
+</th>
+</tr>
+</tbody>
+</table>
+<div id="description"></div>
+
+</article>
+</div>
+</body>
+</html>
