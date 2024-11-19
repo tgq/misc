@@ -212,14 +212,16 @@ def exfir(fname):
         'Signature:'
     ]
     changeStr=[
-        'Follow up Type: Required Markings',
-        'Follow up Type: Required Tests',
-        'Follow up Type: Compliance Pending',
         'Nonconforming Product',
-        'Required Tests',
+        'Follow up Type: Required Tests',
+        'Follow up Type: Required Markings',
+        'Required Markings',
+        'Follow up Type: Compliance Pending',
         "Product not listed in CSA's Certification Record",
+        'Required Tests',
         'Follow up Type: Test Equipment Calibration'
     ]
+    VN_Code='BECCAFEE'
     productStr=[
         'Production found bearing the CSA Mark',
         'Unauthorized product found bearing the CSA Mark',
@@ -233,6 +235,7 @@ def exfir(fname):
     txpg=[]
     stPoint={}
     enPoint={}
+    ver=''
     with pdfplumber.open(fname) as pdf:
         pgs=pdf.pages
         npg=len(pgs)
@@ -247,13 +250,27 @@ def exfir(fname):
         if txpg[1]!="FACTORY INSPECTION REPORT":
             print('Not as expected: FIR title')
             return {}
+        lastline=txpg[-1]
+        if lastline.startswith('QD-1436-TMP Rev. 2023-08-29'):
+            ver='230829'
+            enP=3
+        elif lastline.startswith('QD-1436-TMP Rev. 11-01-21'):
+            ver='211101'
+            enP=2
+        elif lastline.startswith('DQD513 Rev. 2021-04-12'):
+            ver='210412'
+            enP=2
+        if ver=='':
+            print('FIR Version Not Known')
+            print(lastline)
+            return {}
         fir['ftyid']=int(txpg[0].split(':')[1])
         fir['fc']=int(txpg[2].split(':')[1])
         fir['master']=int(txpg[3].split(':')[1])
         fir['idate']=datetime.strptime(txpg[4].split(':')[1], ' %B %d, %Y').date()
         fir['pages']=int(txpg[-1].split(' ')[-1])
         for i in range(1,fir['pages']):
-            txpg.extend(pgs[i].extract_text().split('\n')[5:-3])
+            txpg.extend(pgs[i].extract_text().split('\n')[5:-enP])
     prePnt=-1
     stid=-1
     for i in range(8,len(txpg)):
@@ -264,23 +281,16 @@ def exfir(fname):
                 enPoint[prePnt]=i
             prePnt=stid
     enPoint[stid]=len(txpg)
+    #print(txpg)
+    #print(enPoint)
     fir['code']=''
     for key in stPoint.keys():
         match key:
             case 0: # VN found
                 for i in range(stPoint[key],enPoint[key]):
                     if txpg[i] in changeStr:
-                        match changeStr.index(txpg[i]):
-                            case 0:
-                                fir['code']+="C" if "C" not in fir['code'] else ''
-                            case 1 | 4 | 6:
-                                fir['code']+="E" if "E" not in fir['code'] else ''
-                            case 2:
-                                fir['code']+="A" if "A" not in fir['code'] else ''
-                            case 3:
-                                fir['code']+="B" if "B" not in fir['code'] else ''
-                            case 5:
-                                fir['code']+="F" if "F" not in fir['code'] else ''
+                        code2a=VN_Code[changeStr.index(txpg[i])]
+                        fir['code']+=code2a if code2a not in fir['code'] else ''
             case 1: # full OK
                 fir['code']+="K"
             case 2: # Retest
