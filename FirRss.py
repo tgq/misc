@@ -49,17 +49,25 @@ def createTable():
     conn.close()
 
 def getFFcook():
-    pth=os.getenv('APPDATA')+"\\Mozilla\\Firefox\\Profiles"
-    arr = os.listdir(pth)
     ffcook=''
-    for a in arr:
-        if a.endswith('.default'):
-            ffcook=pth+"\\"+a+'\\cookies.sqlite'
-            break
+    if sys.platform.startswith('win'):
+        pth=os.getenv('APPDATA')+"\\Mozilla\\Firefox\\Profiles"
+        arr = os.listdir(pth)
+        for a in arr:
+            if a.endswith('.default'):
+                ffcook=pth+"\\"+a+'\\cookies.sqlite'
+                break
+    elif sys.platform.startswith('linux'):
+        profile_dir = os.path.expanduser('~/.mozilla/firefox/')
+        profile_name = os.listdir(profile_dir)[0]  # 假设只有一个配置文件
+        ffcook = os.path.join(profile_dir, profile_name, 'cookies.sqlite')
+    if not os.path.exists(ffcook):
+        print('Get FireFox Cookies File Error:', ffcook)
+        return ''
     con=sqlite3.connect(ffcook)
     spcook=pd.read_sql("select name, value, host from moz_cookies "
-                       "where (name not like 'e600ad%' and name not like 'nSGt-%') and "
-                           "(host='csagrporg.sharepoint.com' or host='.sharepoint.com')", con)
+                        "where (name not like 'e600ad%' and name not like 'nSGt-%') and "
+                        "(host='csagrporg.sharepoint.com' or host='.sharepoint.com')", con)
     con.close()
     cook={}
     for i,r in spcook.iterrows():
@@ -139,7 +147,7 @@ def dlPdf(df,n):
     t=df.at[n,"Title"]
     fc=df.at[n,'Factory Contract']
     ur=pdf%(fc,t)
-    fname='dl_fir\\'+t+'.pdf'
+    fname=os.path.join('dl_fir',t+'.pdf')
     r=rq.get(ur,cookies=getFFcook())
     if r.status_code==200:
         with open(fname,'wb') as f:
