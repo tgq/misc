@@ -10,7 +10,10 @@ import pdfplumber
 from sqlalchemy import create_engine, text
 from IPython.display import display
 import pickle
-from threading import Timer
+
+# from threading import Timer
+import sched
+import time
 
 cni_file = r"D:\CNI\CN-Inspect.mdb"
 cni_db = None
@@ -95,19 +98,31 @@ def createTable():
     conn.close()
 
 
-def getFFcook():
-    ffcook = ""
+def getFFprofile():
+    ckfile = "cookies.sqlite"
+    prof = ""
     if sys.platform.startswith("win"):
         pth = os.getenv("APPDATA") + "\\Mozilla\\Firefox\\Profiles"
         arr = os.listdir(pth)
         for a in arr:
             if a.endswith(".default"):
-                ffcook = pth + "\\" + a + "\\cookies.sqlite"
-                break
+                if os.path.exists(os.path.join(pth, a, ckfile)):
+                    prof = os.path.join(pth, a)
+                    break
     elif sys.platform.startswith("linux"):
-        profile_dir = os.path.expanduser("~/.mozilla/firefox/")
-        profile_name = os.listdir(profile_dir)[0]  # 假设只有一个配置文件
-        ffcook = os.path.join(profile_dir, profile_name, "cookies.sqlite")
+        pth = os.path.expanduser("~/.mozilla/firefox/")
+        arr = os.listdir(pth)
+        for a in arr:
+            if a.endswith(".default-esr"):
+                if os.path.exists(os.path.join(pth, a, ckfile)):
+                    prof = os.path.join(pth, a)
+                    break
+    return prof
+
+
+def getFFcook():
+    profile_dir = getFFprofile()
+    ffcook = os.path.join(profile_dir, "cookies.sqlite")
     if not os.path.exists(ffcook):
         print("Get FireFox Cookies File Error:", ffcook)
         return ""
@@ -125,6 +140,39 @@ def getFFcook():
     return cook
 
 
+def loadFF():
+    from selenium import webdriver
+    from selenium.webdriver.firefox.service import Service
+
+    ffprofile = getFFprofile()
+    if ffprofile == "":
+        print("Opps!! No Firefox Profile availabel.")
+        return False
+    firefox_options = webdriver.FirefoxOptions()
+    firefox_options.add_argument("--no-sandbox")
+    firefox_options.add_argument("--disable-gpu")
+    # firefox_options.add_argument('headless')
+    # firefox_options.add_argument('blink-settings=imagesEnabled=false')
+    firefox_options.add_argument("-profile")
+    firefox_options.add_argument(ffprofile)
+    firefox_options.set_preference("permissions.default.image", 1)
+    service = Service(
+        executable_path=os.path.join(
+            os.path.expanduser("~"),
+            "geckodriver" + (".exe" if sys.platform.startswith("win") else ""),
+        )
+    )
+    driver = webdriver.Firefox(service=service, options=firefox_options)
+    driver.get("https://csagrporg.sharepoint.com/sites/FIR/Documents")
+    if driver.title == "Documents - All Documents":
+        driver.close()
+        return True
+    else:
+        print("Failed to load FIR/Documents page")
+        driver.close()
+        return False
+
+
 def get_cook(ff=False):
     global rqs
     rqs = rq.Session()
@@ -139,7 +187,7 @@ def get_cook(ff=False):
             get_cook(1)
 
 
-def getRss(filename="fir.xml"):
+def getRss(filename="fir.xml", autoLoadFF=False):
     global rqs, fail_flag
     if not rqs:
         get_cook()
@@ -152,6 +200,7 @@ def getRss(filename="fir.xml"):
         print("Net error: ", e)
         return pd.DataFrame()
     if r.status_code == 200:
+        fail_flag = False
         save_cook()
         if len(filename) > 0:
             with open(filename, "wb") as f:
@@ -159,12 +208,24 @@ def getRss(filename="fir.xml"):
             return rss2df(filename)
         else:
             return rss2df("", r.content)
+    elif r.status_code == 304:
+        if autoLoadFF and fail_flag != 304:
+            print('.304. Trying to refresh with Firefox...')
+            loadFF()
+            get_cook(1)
+            fail_flag = 304
+            return getRss(filename, autoLoadFF)
+        else:
+            print(
+                "Rss-get status code: %d\n"
+                "Refresh cookies here: %s"
+                % (r.status_code, ur.split("_")[0] + "Documents")
+            )
+            print("...and then run: get_cook(1)")
+            fail_flag = True
+            return pd.DataFrame()
     else:
-        print(
-            "Rss-get status code: %d\n"
-            "Refresh cookies here: %s" % (r.status_code, ur.split("_")[0] + "Documents")
-        )
-        print("...and then run: get_cook(1)")
+        print("Rss-get status code: %d\n" % r.status_code)
         fail_flag = True
         return pd.DataFrame()
 
@@ -205,7 +266,9 @@ def writeDb(df):
         return 0
     minSync = df.SyncTime.min()
     conn = sqlite3.connect("FirRss.db")
-    rss = pd.read_sql("select title from rss where SyncTime>='%s'" % minSync, conn)
+    rss = pd.read_sql_query(
+        "select title from rss where SyncTime>=?", conn, params=(minSync,)
+    )
     wdf = df[~df.Title.isin(rss.Title)]
     wdf.to_sql("rss", con=conn, if_exists="append", index=False)
     conn.close()
@@ -222,7 +285,7 @@ def writeDb(df):
 
 def db(return_df=False, show=True):
     conn = sqlite3.connect("FirRss.db")
-    df = pd.read_sql("select * from rss order by SyncTime desc", conn)
+    df = pd.read_sql_query("select * from rss order by SyncTime desc", conn)
     conn.close()
     if show:
         display(df.fillna(""))
@@ -253,18 +316,17 @@ def dlPdf(df, n):
 
 def dl_rssfir(dt, emp=""):
     conn = sqlite3.connect("FirRss.db")
-    iempstr = "'"
-    if emp != "":
-        iempstr = "' AND Inspector='%s'" % emp
-    sql = """
+    sql = (
+        """
         SELECT rss.Title as rt, [Inspection Date] as idate, Inspector 
         FROM rss LEFT JOIN fir ON fir.title =rt 
-        WHERE fir.title IS NULL AND [Inspection Date]>'%s
-        ORDER BY idate desc
-        """ % (
-        dt + iempstr
+        WHERE fir.title IS NULL AND [Inspection Date]> ? """
+        + ("AND Inspector= ? " if emp != "" else "")
+        + "ORDER BY idate desc"
     )
-    dbf = pd.read_sql(sql, conn, index_col=None)
+    dbf = pd.read_sql_query(
+        sql, conn, params=(dt, emp) if emp != "" else (dt,), index_col=None
+    )
     todl = dbf.rt.tolist()
     print("%d FIR to download." % len(todl))
     firs = []
@@ -288,7 +350,7 @@ def dlPfc(fc, idate=0):
         f_c = fc
         i_date = idate
     ur = pdf % (f_c, f_c, i_date)
-    fname = "dl_fir\\%d-%d.pdf" % (f_c, i_date)
+    fname = os.path.join("dl_fir", "%d-%d.pdf" % (f_c, i_date))
     # r=rq.get(ur,cookies=getFFcook())
     r = rqs.get(ur)
     if r.status_code == 200:
@@ -306,10 +368,11 @@ def cni_fc(dt, empid):
     irec = pd.read_sql(
         text(
             "select sub,[date], EmployeeID from tblInspRecordAll "
-            "where EmployeeID='%s' and ChargeDescription='FactoryVisitCharge' and ftyid is not null "
-            "and [date]>=#%s#" % (empid, dt)
+            "where EmployeeID=? and ChargeDescription='FactoryVisitCharge' and ftyid is not null "
+            "and [date]>=#%s#" % dt
         ),
         cni_db,
+        params=(empid,),
     )
     for i, r in irec.iterrows():
         dlPfc(int(r["sub"]), int(r["date"].strftime("%Y%m%d")))
@@ -324,6 +387,7 @@ def exfir(fname):
         "Product Observations",
         "Factory Tests",
         "Signature:",
+        "Previous FIR Follow-Up:",
     ]
     changeStr = [
         "Nonconforming Product",
@@ -336,6 +400,15 @@ def exfir(fname):
         "Follow up Type: Test Equipment Calibration",
     ]
     VN_Code = "BECCAFEE"
+    fuType = [
+        "Nonconforming Product",
+        "Required Tests",
+        "Required Markings",
+        "Compliance Pending",
+        "Product not listed in CSA's Certification Record",
+        "Test Equipment Calibration",
+    ]
+    fuCode = "BECAFE"
     productStr = [
         "Production found bearing the CSA Mark",
         "Unauthorized product found bearing the CSA Mark",
@@ -418,17 +491,17 @@ def exfir(fname):
                         if productStr.index(txpg[i]) == 2:
                             fir["code"] += "Z"
                         elif productStr.index(txpg[i]) == 0:
-                            di=2
+                            di = 2
                             fir["product"] = txpg[i + di].split(": ", 1)[1]
-                            di+=1
-                            if txpg[i + di][0]!='•':
-                                di+=1
+                            di += 1
+                            if txpg[i + di][0] != "•":
+                                di += 1
                             fir["model"] = txpg[i + di].split(": ", 1)[1]
-                            di+=1
+                            di += 1
                             fir["class"] = txpg[i + di].split(": ", 1)[1]
-                            di+=1
+                            di += 1
                             fir["report"] = txpg[i + di].split(": ", 1)[1]
-                            di+=1
+                            di += 1
                             fir["project"] = txpg[i + di].split(": ", 1)[1]
             case 5:  # Factory Test.
                 if txpg[stPoint[key] + 1] != "No factory test required":
@@ -440,6 +513,17 @@ def exfir(fname):
                 las = txpg[enPoint[key] - 1].split(" ")
                 fir["arrival"] = datetime.fromisoformat("%sT%s" % (las[1], las[2]))
                 fir["departure"] = datetime.fromisoformat("%sT%s" % (las[4], las[5]))
+            case 7:  # Previous Followup
+                fuPcode = ""
+                for i in range(stPoint[key], enPoint[key]):
+                    if txpg[i] == "Follow up Description:":
+                        if txpg[i + 1] in fuType:
+                            fuPcode = fuCode[fuType.index(txpg[i + 1])]
+                    elif txpg[i].startswith(
+                        "The follow up items noted above were again found out of "
+                    ):
+                        fir["code"] += fuPcode if fuPcode not in fir["code"] else ""
+                        fir["code"] += "R" if "R" not in fir["code"] else ""
         fir["title"] = str(fir["fc"]) + "-" + fir["idate"].strftime("%Y%m%d")
     return fir
 
@@ -454,13 +538,37 @@ def fir_dir(d):
     return al
 
 
+def mergeDb(fname):
+    if not os.path.exists(fname):
+        print("File not found:", fname)
+        return
+    conn = sqlite3.connect("FirRss.db")
+    con2 = sqlite3.connect(fname)
+    df2 = pd.read_sql_query("select * from fir", con2)
+    df1 = pd.read_sql_query("select * from fir", conn)
+    dd = df2[~df2.title.isin(df1.title)]
+    dd.to_sql("fir", conn, if_exists="append", index=False)
+    fira = dd.shape[0]
+    df2 = pd.read_sql_query("select * from rss", con2)
+    df1 = pd.read_sql_query("select * from rss", conn)
+    dd = df2[~df2.Title.isin(df1.Title)]
+    dd.to_sql("rss", conn, if_exists="append", index=False)
+    rssa = dd.shape[0]
+    con2.close()
+    conn.close()
+    print("Fir Added:\t%d" % fira)
+    print("Rss Added:\t%d" % rssa)
+
+
 def fir2db(rslist):
     if len(rslist) == 0:
         return
     rs = pd.DataFrame(rslist)
     minDate = rs.idate.min()
     conn = sqlite3.connect("FirRss.db")
-    dbf = pd.read_sql("select title from fir where idate>='%s'" % minDate, conn)
+    dbf = pd.read_sql_query(
+        "select title from fir where idate>=?", conn, params=(minDate,)
+    )
     wdf = rs[~rs.title.isin(dbf.title)]
     wdf.to_sql("fir", conn, if_exists="append", index=False)
     conn.close()
@@ -469,10 +577,11 @@ def fir2db(rslist):
 
 def dbfir(dt, emp):
     conn = sqlite3.connect("FirRss.db")
-    dbf = pd.read_sql(
+    dbf = pd.read_sql_query(
         "select idate,ftyid, fc, master,empid, ftyname, code from fir "
-        "where Empid='%s' and idate>='%s' order by idate, arrival" % (emp, dt),
+        "where (Empid=?) and idate>=? order by empid, idate, arrival",
         conn,
+        params=(emp, dt),
         index_col=None,
     )
     if "ipykernel" in sys.modules:
@@ -487,10 +596,10 @@ def xdate(x):
     return ("" if dd[:5] == x["idate"][-5:] else ">") + dd
 
 
-def rss(reget=True):
+def rss(reget=True, autoLoadFF=False):
     if reget:
         print(datetime.now().strftime("%b.%d %H:%M:%S"))
-        added = writeDb(getRss(""))
+        added = writeDb(getRss("", autoLoadFF=autoLoadFF))
         if added == 0:
             return
     cn_emp = {
@@ -507,14 +616,40 @@ def rss(reget=True):
     df["sync"] = df[["syn", "idate"]].apply(xdate, axis=1)
     df["empc"] = df["emp"].replace(cn_emp)
     dff = df[["empc", "sync", "fid", "fc", "idate", "class", "model"]]
-    display(dff.head(30).fillna(""))
+    display(dff.head(added + 1).fillna(""))
 
 
-def rsspermin(n=60):
+""" def rsspermin(n=60):
     rss()
     if not fail_flag:
-        Timer(n * 60, rsspermin, [n]).start()
+        Timer(n * 60, rsspermin, [n]).start() """
+
+
+def sch():
+    rss(autoLoadFF=True)
+    if not fail_flag:
+        s = sched.scheduler(time.time, time.sleep)
+        b = pd.Timestamp.now("Asia/Shanghai").floor("2h")
+        if b.hour < 22:
+            if b.hour < 8:
+                b = b.replace(hour=8)
+            if b.weekday() < 5:
+                h_delta = 2
+            else:
+                h_delta = 4
+        else:
+            b = b.replace(hour=22)
+            h_delta = 12
+        c = int((b + timedelta(hours=h_delta)).timestamp())
+        s.enterabs(c, 1, sch)
+        print("......Waiting for next run on: %s ......" % datetime.fromtimestamp(c))
+        s.run()
 
 
 if __name__ == "__main__":
-    rss(len(sys.argv) == 1)
+    if len(sys.argv) == 1:
+        rss()
+    elif sys.argv[1] == "sch":
+        sch()
+    else:
+        rss(False)
