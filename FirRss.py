@@ -10,10 +10,35 @@ import pdfplumber
 from sqlalchemy import create_engine, text
 from IPython.display import display
 import pickle
-
-# from threading import Timer
 import sched
 import time
+import smtplib
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import COMMASPACE, formatdate
+
+
+def send_mail(send_to, subject, text, files=None, server="smtp.qiye.163.com"):
+    assert isinstance(send_to, list)
+    msg = MIMEMultipart()
+    send_from = "csafir@ccicgd.com"
+    msg["From"] = send_from
+    msg["To"] = COMMASPACE.join(send_to)
+    msg["Date"] = formatdate(localtime=True)
+    msg["Subject"] = subject
+    msg.attach(MIMEText(text))
+    for f in files or []:
+        with open(f, "rb") as fil:
+            part = MIMEApplication(fil.read(), Name=os.path.basename(f))
+        part["Content-Disposition"] = 'attachment; filename="%s"' % os.path.basename(f)
+        msg.attach(part)
+    smtp = smtplib.SMTP(server, port=25)
+    smtp.starttls()
+    smtp.login("csafir@ccicgd.com", "msXUCqJARxqt5Kxg")
+    smtp.sendmail(send_from, send_to, msg.as_string())
+    smtp.quit()
+
 
 cni_file = r"D:\CNI\CN-Inspect.mdb"
 cni_db = None
@@ -210,7 +235,7 @@ def getRss(filename="fir.xml", autoLoadFF=False):
             return rss2df("", r.content)
     elif r.status_code == 304:
         if autoLoadFF and fail_flag != 304:
-            print('.304. Trying to refresh with Firefox...')
+            print(".304. Trying to refresh with Firefox...")
             loadFF()
             get_cook(1)
             fail_flag = 304
@@ -597,6 +622,7 @@ def xdate(x):
 
 
 def rss(reget=True, autoLoadFF=False):
+    added = 0
     if reget:
         print(datetime.now().strftime("%b.%d %H:%M:%S"))
         added = writeDb(getRss("", autoLoadFF=autoLoadFF))
@@ -625,25 +651,38 @@ def rss(reget=True, autoLoadFF=False):
         Timer(n * 60, rsspermin, [n]).start() """
 
 
-def sch():
+def sch(send_error_mail=True):
     rss(autoLoadFF=True)
     if not fail_flag:
         s = sched.scheduler(time.time, time.sleep)
-        b = pd.Timestamp.now("Asia/Shanghai").floor("2h")
-        if b.hour < 22:
-            if b.hour < 8:
-                b = b.replace(hour=8)
-            if b.weekday() < 5:
+        current = pd.Timestamp.now("Asia/Shanghai").floor("2h")
+        if current.hour < 22:
+            if current.weekday() < 5:
                 h_delta = 2
             else:
                 h_delta = 4
         else:
-            b = b.replace(hour=22)
             h_delta = 12
-        c = int((b + timedelta(hours=h_delta)).timestamp())
-        s.enterabs(c, 1, sch)
-        print("......Waiting for next run on: %s ......" % datetime.fromtimestamp(c))
+        next = current + timedelta(hours=h_delta)
+        if next.hour < 10:
+            next = next.replace(hour=10)
+        next = int(next.timestamp())
+        s.enterabs(next, 1, sch)
+        print("......Waiting for next run on: %s ......" % datetime.fromtimestamp(next))
         s.run()
+    elif send_error_mail:
+        dt = datetime.now().strftime("%m-%d_%H_%M_%S")
+        ffname = "rssfail_%s.jpg" % dt
+        if sys.platform.startswith("win"):
+            os.system("nircmd savescreenshotwin %s" % ffname)
+        else:
+            os.system("scrot -u %s" % ffname)
+        send_mail(
+            ["ab123321b@qq.com"],
+            "FirRss失效提示: " + dt,
+            "FirRss发生错误于: " + dt,
+            [ffname],
+        )
 
 
 if __name__ == "__main__":
