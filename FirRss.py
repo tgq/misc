@@ -13,10 +13,12 @@ import pickle
 import sched
 import time
 import smtplib
+from email.header import Header
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import COMMASPACE, formatdate
+import xlwt
 
 
 def send_mail(send_to, subject, text, files=None, server="smtp.qiye.163.com"):
@@ -29,13 +31,16 @@ def send_mail(send_to, subject, text, files=None, server="smtp.qiye.163.com"):
     msg["Subject"] = subject
     msg.attach(MIMEText(text))
     for f in files or []:
+        fname = os.path.basename(f)
         with open(f, "rb") as fil:
-            part = MIMEApplication(fil.read(), Name=os.path.basename(f))
-        part["Content-Disposition"] = 'attachment; filename="%s"' % os.path.basename(f)
+            part = MIMEApplication(fil.read(), Name=fname)
+        part["Content-Disposition"] = (
+            'attachment; filename="%s"' % Header(fname, "utf-8").encode()
+        )
         msg.attach(part)
     smtp = smtplib.SMTP(server, port=25)
     smtp.starttls()
-    smtp.login("csafir@ccicgd.com", "msXUCqJARxqt5Kxg")
+    smtp.login(send_from, "dQLVKEXHxQktrZvJ")
     smtp.sendmail(send_from, send_to, msg.as_string())
     smtp.quit()
 
@@ -645,12 +650,6 @@ def rss(reget=True, autoLoadFF=False):
     display(dff.head(added + 1).fillna(""))
 
 
-""" def rsspermin(n=60):
-    rss()
-    if not fail_flag:
-        Timer(n * 60, rsspermin, [n]).start() """
-
-
 def sch(send_error_mail=True):
     rss(autoLoadFF=True)
     if not fail_flag:
@@ -673,6 +672,7 @@ def sch(send_error_mail=True):
     elif send_error_mail:
         dt = datetime.now().strftime("%m-%d_%H_%M_%S")
         ffname = "rssfail_%s.jpg" % dt
+        time.sleep(1)
         if sys.platform.startswith("win"):
             os.system("nircmd savescreenshotwin %s" % ffname)
         else:
@@ -683,6 +683,146 @@ def sch(send_error_mail=True):
             "FirRss发生错误于: " + dt,
             [ffname],
         )
+
+
+def smfir(for_emp="gz", debug=False):
+    gzemp = {
+        "15353": "谭广球",
+        "15345": "沈聪翀",
+        "15354": "王瀚城",
+        "15359": "吴郁淳",
+        "15313": "陈锦图",
+        "15350": "孙涛",
+        "15364": "曾浩彬",
+    }
+    gzmail = {
+        "15353": "tanguangqiu",
+        "15345": "shencongchong",
+        "15354": "wanghancheng",
+        "15359": "wuyuchun",
+        "15313": "chenjintu",
+        "15350": "suntao",
+        "15364": "zenghaobin",
+    }
+    gzcsamail = {
+        "15353": "guangqiu.tan",
+        "15345": "congchong.shen",
+        "15354": "hancheng.wang",
+        "15359": "yuchun.wu",
+        "15313": "jintu.chen",
+        "15350": "tao.sun",
+        "15364": "haobin.zeng",
+    }
+    yan_email = "huangyanjun@ccicgd.com"
+    if for_emp == "gz":
+        femp = format(tuple(gzemp.keys()))
+    else:
+        if for_emp in gzemp.keys():
+            femp = f"('{for_emp}')"
+        else:
+            print("ID not found...")
+            return pd.DataFrame()
+    weekmonday = pd.Period.now("W-SUN").start_time.strftime("%Y-%m-%d")
+    conn = sqlite3.connect("FirRss.db")
+    dbf = pd.read_sql_query(
+        "SELECT idate as DateOfInspection, ftyid as FACCID, fc as AGMTPF, master as MasterFile, "
+        "empid as EmployeeID, ftyname as MarketingCode, code as InspectionCode, "
+        "'' as TripNo, '' as Location, '' as ChargeDescription FROM fir "
+        f"WHERE (Empid in {femp}) and idate>='{weekmonday}' ORDER BY empid, idate, arrival",
+        conn,
+        index_col=None,
+    )
+    conn.close()
+    if dbf.shape[0] == 0:
+        print("Nothing to submit....")
+        return pd.DataFrame()
+    dbf.DateOfInspection = dbf.DateOfInspection.apply(s2date)
+    cnt = (
+        dbf.groupby("EmployeeID")
+        .agg({"FACCID": pd.Series.nunique, "AGMTPF": pd.Series.nunique})
+        .reset_index()
+    )
+    cnt["name"] = cnt["EmployeeID"].map(gzemp)
+    cnt.columns = ["id", "厂", "FIR", "姓名"]
+    cnt = cnt[["id", "姓名", "厂", "FIR"]]
+    s_today = pd.Timestamp.now().strftime("%Y-%m-%d")
+    if for_emp == "gz":
+        e_name = "广州中心"
+        str_stamnt = "（实际完成情况以检验员的确认邮件为准。）"
+        e_to = [yan_email, gzmail["15353"] + "@ccicgd.com"]
+    else:
+        e_name = gzemp[for_emp]
+        str_stamnt = f"\n（请检验员按实际完成情况, 将确认信息转发至 {yan_email} ）"
+        e_to = [gzmail[for_emp] + "@ccicgd.com"]
+        # e_to=[gzmail["15353"]+'@ccicgd.com', ]
+    smt_file = "FIR_submit_(%s)_%s.xls" % (e_name, s_today)
+    smt_file = os.path.join("smt_xls", smt_file)
+    xlok = smdf2xls(dbf, smt_file)
+    if xlok and os.path.exists(smt_file) and not debug:
+        send_mail(
+            e_to,
+            "FIRs Done Report (%s) %s" % (e_name, s_today),
+            ("本周完成的FIR，共【 %d 】个 ：%s \n\n" % (dbf.shape[0], str_stamnt))
+            + cnt.to_string(index=False),
+            [smt_file],
+        )
+    return cnt, dbf
+
+
+def s2date(s):
+    return datetime.strptime(s, "%Y-%m-%d")
+
+
+def smdf2xls(df, xfile):
+    book = xlwt.Workbook()
+    sh = book.add_sheet("submit")  # , cell_overwrite_ok=True)
+    col = df.keys()
+    colw = [15, 10, 10, 10, 10, 50, 15, 10, 10, 15]
+    for x, i in enumerate(col):
+        sh.write(0, x, i)
+    cw = 256
+    for x, i in enumerate(colw):
+        sh.col(x).width = cw * i
+    cols = len(col)
+    clr_font = xlwt.Font()
+    clr_font.colour_index = 0x3C  # brown
+    date_format = xlwt.XFStyle()
+    date_format.num_format_str = "yyyy-mm-dd"
+    date_colored = xlwt.XFStyle()
+    date_colored.num_format_str = "yyyy-mm-dd"
+    date_colored.font = clr_font
+    sty_colored = xlwt.XFStyle()
+    sty_colored.font = clr_font
+    pemp = ""
+    ucolor = False
+    for i, r in df.iterrows():
+        if r.EmployeeID != pemp:
+            ucolor = not ucolor
+            pemp = r.EmployeeID
+        for x in range(cols):
+            if x == 0:
+                sh.write(
+                    i + 1, x, r.iloc[x], date_colored if ucolor else date_format
+                )  # date_colored if ucolor else date_format)
+            else:
+                if ucolor:
+                    sh.write(i + 1, x, r.iloc[x], sty_colored)
+                else:
+                    sh.write(i + 1, x, r.iloc[x])
+    try:
+        book.save(xfile)
+        return True
+    except Exception as e:
+        print(e)
+        return False
+
+
+def smt():
+    gz = smfir()[0]
+    print(gz.to_string(index=False))
+    if not gz.empty:
+        for i, r in gz.iterrows():
+            smfir(r.iloc[0])
 
 
 if __name__ == "__main__":
